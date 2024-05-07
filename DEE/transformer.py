@@ -205,7 +205,100 @@ class MultiHeadedAttention(nn.Module):
 
         return self.linears[-1](x)
 
+class MultiHeadAttentionRAAT(nn.Module):
+    def __init__(self, num_attention_heads, hidden_size, entity_structure, dropout=0.1, num_structural_dependencies=21):
+        super(MultiHeadAttentionRAAT, self).__init__()
+        if hidden_size % num_attention_heads != 0:
+            raise ValueError(
+                "The hidden size (%d) is not a multiple of the number of attention "
+                "heads (%d)" % (hidden_size, num_attention_heads)
+            )
 
+        self.num_attention_heads = num_attention_heads
+        self.attention_head_size = int(hidden_size / num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+        self.query = nn.Linear(hidden_size, self.all_head_size)
+        self.key = nn.Linear(hidden_size, self.all_head_size)
+        self.value = nn.Linear(hidden_size, self.all_head_size)
+        self.dense = nn.Linear(hidden_size, self.all_head_size)
+
+        self.dropout = nn.Dropout(dropout)
+
+        # RAAT
+        self.entity_structure = entity_structure
+        if entity_structure != 'none':
+            num_structural_dependencies = num_structural_dependencies  # 21 distinct dependencies of entity structure.
+            # if entity_structure == 'decomp':
+            #     self.bias_layer_k = nn.ParameterList(
+            #         [nn.Parameter(nn.init.xavier_uniform_(torch.empty(self.num_attention_heads, self.attention_head_size))) for _ in range(num_structural_dependencies)])
+            #     self.bias_layer_q = nn.ParameterList(
+            #         [nn.Parameter(nn.init.xavier_uniform_(torch.empty(self.num_attention_heads, self.attention_head_size))) for _ in range(num_structural_dependencies)])
+            # elif entity_structure == 'biaffine':
+            #     self.bili = nn.ParameterList(
+            #         [nn.Parameter(nn.init.xavier_uniform_(torch.empty(self.num_attention_heads, self.attention_head_size, self.attention_head_size)))
+            #          for _ in range(num_structural_dependencies)])
+            # self.abs_bias = nn.ParameterList(
+            #     [nn.Parameter(torch.zeros(self.num_attention_heads)) for _ in range(num_structural_dependencies)])
+            if entity_structure == 'decomp':
+                self.bias_layer_k = nn.Parameter(nn.init.xavier_uniform_(
+                    torch.empty(num_structural_dependencies, self.num_attention_heads, self.attention_head_size)))
+                self.bias_layer_q = nn.Parameter(nn.init.xavier_uniform_(
+                    torch.empty(num_structural_dependencies, self.num_attention_heads, self.attention_head_size)))
+            elif entity_structure == 'biaffine':
+                self.bili = nn.Parameter(nn.init.xavier_uniform_(torch.empty(
+                                         num_structural_dependencies, self.num_attention_heads,
+                                         self.attention_head_size, self.attention_head_size)))
+
+            self.abs_bias = nn.Parameter(torch.zeros(num_structural_dependencies, self.num_attention_heads)) #论文中的bias_i
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+    def forward(self, query, key, value, mask=None, **kwargs):
+        structure_mask = kwargs.pop("structure_mask")
+        mixed_query_layer = self.query(query)
+        mixed_key_layer = self.key(key)
+        mixed_value_layer = self.value(value)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+        key_layer = self.transpose_for_scores(mixed_key_layer)
+        value_layer = self.transpose_for_scores(mixed_value_layer)
+
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2)) #S_b
+
+        # RAAT
+        if structure_mask is not None and self.entity_structure != 'none':
+            # num_structural_dependencies = 21
+            # for i in range(num_structural_dependencies):
+            #     if self.entity_structure == 'decomp':
+            #         attention_bias_q = torch.einsum("bnid,nd->bni", query_layer, self.bias_layer_k[i]).unsqueeze(-1).repeat(1, 1, 1, query_layer.size(2))
+            #         attention_bias_k = torch.einsum("nd,bnjd->bnj", self.bias_layer_q[i], key_layer).unsqueeze(-2).repeat(1, 1, key_layer.size(2), 1)
+            #         attention_scores += (attention_bias_q + attention_bias_k + self.abs_bias[i][None, :, None, None]) * structure_mask[i]
+            #     elif self.entity_structure == 'biaffine':
+            #         attention_bias = torch.einsum("bnip,npq,bnjq->bnij", query_layer, self.bili[i], key_layer)
+            #         attention_scores += (attention_bias + self.abs_bias[i][None, :, None, None]) * structure_mask[i]
+
+            attention_bias = torch.einsum("bnip,knpq,bnjq->kbnij", query_layer, self.bili, key_layer) #S_a
+            attention_bias = (attention_bias + self.abs_bias[:, None, :, None, None]) * structure_mask[:, None, None, :, :]
+            attention_scores += torch.sum(attention_bias, dim=0)
+
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        if mask is not None:
+            attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
+        attention_probs = F.softmax(attention_scores, dim=-1)
+        attention_probs = self.dropout(attention_probs)
+        context_layer = torch.matmul(attention_probs, value_layer)
+
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+
+        output = self.dense(context_layer)
+
+        return output
 class PositionwiseFeedForward(nn.Module):
     """Implements FFN equation."""
 
@@ -271,7 +364,7 @@ def make_model(src_vocab, tgt_vocab, num_layers=6, d_model=512, d_ff=2048, h=8, 
             nn.init.xavier_uniform(p)
     return model
 
-
+#原版的编码器
 def make_transformer_encoder(num_layers, hidden_size, ff_size=2048, num_att_heads=8, dropout=0.1):
     dcopy = copy.deepcopy
     mh_att = MultiHeadedAttention(num_att_heads, hidden_size, dropout=dropout)
@@ -283,11 +376,47 @@ def make_transformer_encoder(num_layers, hidden_size, ff_size=2048, num_att_head
     )
 
     return tranformer_encoder
+# 使用关系transformer_encoder
+def make_retransformer_encoder(num_layers, hidden_size, ff_size=2048, num_att_heads=8, dropout=0.1,
+                             raat=False, entity_structure="biaffine", num_structural_dependencies=21):
+    dcopy = copy.deepcopy
+    if raat:
+        mh_att = MultiHeadAttentionRAAT(num_att_heads, hidden_size, entity_structure,
+                                        num_structural_dependencies=num_structural_dependencies)
+    else:
+        mh_att = MultiHeadedAttention(num_att_heads, hidden_size, dropout=dropout)
+    pos_ff = PositionwiseFeedForward(hidden_size, ff_size, dropout=dropout)
 
+    tranformer_encoder = Encoder(
+        EncoderLayer(hidden_size, dcopy(mh_att), dcopy(pos_ff), dropout=dropout),
+        num_layers
+    )
+
+    return tranformer_encoder
+
+#原版的解码器
 def make_transformer_decoder(num_layers, hidden_size, ff_size=2048, num_att_heads=8, dropout=0.1):
     dcopy = copy.deepcopy
     mh_att = MultiHeadedAttention(num_att_heads, hidden_size, dropout=dropout)
     pos_ff = PositionwiseFeedForward(hidden_size, ff_size, dropout=dropout)
+    tranformer_encoder = Decoder(
+        DecoderLayer(hidden_size, dcopy(mh_att), dcopy(mh_att), dcopy(pos_ff), dropout=dropout),
+        num_layers
+    )
+
+    return tranformer_encoder
+# 使用关系transformer_decoder
+def make_retransformer_decoder(num_layers, hidden_size, ff_size=2048, num_att_heads=8, dropout=0.1,
+                             raat=False, entity_structure="biaffine", num_structural_dependencies=21):
+    dcopy = copy.deepcopy
+    if raat:
+        mh_att = MultiHeadAttentionRAAT(num_att_heads, hidden_size, entity_structure,
+                                        num_structural_dependencies=num_structural_dependencies)
+    else:
+        mh_att = MultiHeadedAttention(num_att_heads, hidden_size, dropout=dropout)
+        
+    pos_ff = PositionwiseFeedForward(hidden_size, ff_size, dropout=dropout)
+
     tranformer_encoder = Decoder(
         DecoderLayer(hidden_size, dcopy(mh_att), dcopy(mh_att), dcopy(pos_ff), dropout=dropout),
         num_layers
