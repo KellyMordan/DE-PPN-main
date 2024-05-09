@@ -137,8 +137,13 @@ class SetPre4DEEModel(nn.Module):
 
         if self.config.use_doc_enc:
             # get doc-level context information for every mention and sentence
-            self.doc_context_encoder = transformer.make_transformer_encoder(
-                config.num_tf_layers, config.hidden_size, ff_size=config.ff_size, dropout=config.dropout
+            # self.doc_context_encoder = transformer.make_transformer_encoder(
+            #     config.num_tf_layers, config.hidden_size, ff_size=config.ff_size, dropout=config.dropout
+            # )
+            self.doc_context_encoder = transformer.make_retransformer_encoder(
+                config.num_tf_layers, config.hidden_size, ff_size=config.ff_size, dropout=config.dropout,
+                raat=config.raat, entity_structure=config.entity_structure,
+                num_structural_dependencies=config.num_relation + 3
             )
 
         self.Setpred4DEE = SetPred4DEE(config, self.event_type2role_index_list)

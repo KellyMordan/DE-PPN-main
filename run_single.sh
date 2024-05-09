@@ -18,5 +18,9 @@ set -vx
         --dev_file_name='dev.json' \
         --test_file_name='test.json' \
         --train_on_multi_events=True \
-        --train_on_single_event=True
+        --train_on_single_event=True \
+        --re_label_map_path ./Data/label_map.json \
+        --raat True \
+        --raat_path_mem True \
+        --num_relation 18
 }

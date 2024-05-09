@@ -51,11 +51,21 @@ class SetPred4DEE(nn.Module):
         self.cross_entropy = nn.CrossEntropyLoss(reduction="sum")
 
         if self.config.use_sent_span_encoder:
-            self.span_sent_encodr = transformer.make_transformer_encoder(config.num_tf_layers, config.hidden_size, ff_size=config.ff_size, dropout=config.dropout)
+            # self.span_sent_encodr = transformer.make_transformer_encoder(config.num_tf_layers, config.hidden_size, 
+            #                                                              ff_size=config.ff_size, dropout=config.dropout)
+            self.span_sent_encodr = transformer.make_retransformer_encoder(
+                config.num_tf_layers, config.hidden_size, ff_size=config.ff_size, dropout=config.dropout,
+                raat=config.raat, entity_structure=config.entity_structure,
+                num_structural_dependencies=config.num_relation + 3)
 
         if self.config.use_role_decoder:
-            self.event2role_decoder = transformer.make_transformer_decoder(
-                config.num_event2role_decoder_layer, config.hidden_size, ff_size=config.ff_size, dropout=config.dropout
+            # self.event2role_decoder = transformer.make_transformer_decoder(
+            #     config.num_event2role_decoder_layer, config.hidden_size, ff_size=config.ff_size, dropout=config.dropout
+            # )
+            self.event2role_decoder = transformer.make_retransformer_decoder(
+                config.num_event2role_decoder_layer, config.hidden_size, ff_size=config.ff_size, dropout=config.dropout,
+                raat=config.raat, entity_structure=config.entity_structure,
+                num_structural_dependencies=config.num_relation + 3
             )
 
     def forward(self, doc_sent_context, batch_span_context, doc_span_info, event_type_pred = None, train_flag = True):
@@ -72,7 +82,7 @@ class SetPred4DEE(nn.Module):
         doc_sent_context = doc_sent_context.unsqueeze(0)
         if self.config.use_sent_span_encoder:
             doc_span_sent_context = torch.cat((batch_span_context, doc_sent_context), 1)
-            doc_span_sent_context = self.span_sent_encodr(doc_span_sent_context, None)
+            doc_span_sent_context = self.span_sent_encodr(doc_span_sent_context, None) #Transformer
         else:
             doc_span_sent_context = torch.cat((batch_span_context, doc_sent_context), 1)
 
@@ -127,7 +137,7 @@ class SetPred4DEE(nn.Module):
         event_role_hidden_states = event_role_embed
         if self.config.use_role_decoder:
             pred_role_enc = torch.repeat_interleave(event_role_hidden_states.unsqueeze(1), repeats=self.num_generated_sets, dim=1)
-            pred_set_role_enc = self.event2role_decoder(pred_role_enc.squeeze(0), hidden_states.unsqueeze(2).squeeze(0), None, None)
+            pred_set_role_enc = self.event2role_decoder(pred_role_enc.squeeze(0), hidden_states.unsqueeze(2).squeeze(0), None, None) #transformer
             pred_set_role_tensor = self.metric_1(pred_set_role_enc.unsqueeze(2)) + self.metric_2(doc_span_sent_context).unsqueeze(1)
         else:
             pred_set_tensor = self.metric_1(hidden_states).unsqueeze(2) + self.metric_2(doc_span_sent_context).unsqueeze(1)

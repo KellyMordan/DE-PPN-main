@@ -94,8 +94,12 @@ class NERModel(nn.Module):
             max_sent_len=config.max_sent_len, dropout=config.dropout
         )
         # Multi-layer Transformer Layers to Incorporate Contextual Information
-        self.token_encoder = transformer.make_transformer_encoder(
-            config.num_ner_tf_layers, config.hidden_size, ff_size=config.ff_size, dropout=config.dropout
+        # self.token_encoder = transformer.make_transformer_encoder(
+        #     config.num_ner_tf_layers, config.hidden_size, ff_size=config.ff_size, dropout=config.dropout
+        # )
+        self.token_encoder = transformer.make_retransformer_encoder(
+            config.num_ner_tf_layers, config.hidden_size, ff_size=config.ff_size, dropout=config.dropout,
+            num_structural_dependencies=config.num_relation + 3
         )
         if self.config.use_crf_layer:
             self.crf_layer = CRFLayer(config.hidden_size, self.config.num_entity_labels)

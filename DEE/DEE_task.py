@@ -3,9 +3,11 @@
 # DATE: 21-7-11
 
 import logging
+import json
 import os
 import torch.distributed as dist
 from itertools import product
+from transformers import AutoConfig
 
 from .dee_helper import logger, DEEExample, DEEExampleLoader, DEEFeatureConverter, \
     convert_dee_features_to_dataset, prepare_doc_batch_dict, \
@@ -16,6 +18,8 @@ from .base_task import TaskSetting, BasePytorchTask
 from .event_type import event_type_fields_list
 from .dee_helper import measure_dee_prediction
 from .dee_model import SetPre4DEEModel
+from dre.modeling_bert import BertForDocRED
+from dre.utils import DREProcessor
 
 
 class DEETaskSetting(TaskSetting):
@@ -72,6 +76,17 @@ class DEETaskSetting(TaskSetting):
         ('layer_norm_eps', 1e-12),  # prefer FNs over FPs
         ('num_event2role_decoder_layer', 4),
         ('train_nopair_sets', False)  # Whether train on No-matching sets
+        # 关系模块参数
+        ('use_re', True),
+        ('re_label_map_path', "label_map.json"),
+        ('max_ent_cnt', 42),
+        ('doc_max_length', 512),
+        ('with_naive_feature', True),
+        ("entity_structure", 'biaffine'),
+        ("raat", True),  # whether to substitute vanilla transformer-2 with RAAT module.
+        ("raat_path_mem", False),  # whether to substitute vanilla transformer-3 with RAAT module.
+        ("head_center", True),  # whether use head or tail entity inside relation as RAAT cluster center.
+        ("num_relation", 18),  # consider the number of relations.
     ]
 
     def __init__(self, **kwargs):
@@ -128,7 +143,8 @@ class DEETask(BasePytorchTask):
 
         if self.setting.use_bert:
             ner_model = BertForBasicNER.from_pretrained(
-                self.setting.bert_model, num_entity_labels = self.setting.num_entity_labels, use_crf_layer = self.setting.use_crf_layer
+                self.setting.bert_model, num_entity_labels = self.setting.num_entity_labels, 
+                use_crf_layer = self.setting.use_crf_layer
             )
             self.setting.update_by_dict(ner_model.config.__dict__)  # BertConfig dictionary
             # substitute pooler in bert to support distributed training
@@ -147,11 +163,50 @@ class DEETask(BasePytorchTask):
             )
             self.setting.update_by_dict(ner_model.config.__dict__)  #
             ner_model = None
+        #添加的关系模块
+        if self.setting.use_re:
+            with open(self.setting.re_label_map_path, "r", encoding="utf-8") as f:
+                re_label_map = json.load(f)
+            config = AutoConfig.from_pretrained(
+                self.setting.bert_model,
+                cache_dir=None,
+            )
+            re_model = BertForDocRED.from_pretrained(self.setting.bert_model,
+                                                     from_tf=False,
+                                                     config=config,
+                                                     cache_dir=None,
+                                                     num_labels=len(re_label_map),
+                                                     max_ent_cnt=self.setting.max_ent_cnt,
+                                                     with_naive_feature=self.setting.with_naive_feature,
+                                                     entity_structure=self.setting.entity_structure,
+                                                     )
+            re_processor = DREProcessor(doc_max_length=self.setting.doc_max_length,
+                                        max_ent_cnt=self.setting.max_ent_cnt,
+                                        label_map=re_label_map,
+                                        token_ner_label_list=self.entity_label_list)
 
-        # if self.setting.model_type == 'SetPre4DEE':
-        self.model = SetPre4DEEModel(
-            self.setting, self.event_type_fields_pairs, ner_model=ner_model,
-        )
+            class PseudoPooler(object):
+                def __init__(self):
+                    pass
+
+                def __call__(self, *x):
+                    return x
+
+            del re_model.bert.pooler
+            re_model.bert.pooler = PseudoPooler()
+        else:
+            re_model = None
+            re_label_map = None
+            re_processor = None
+
+        if self.setting.model_type == 'SetPre4DEE':
+            self.model = SetPre4DEEModel(
+                self.setting, self.event_type_fields_pairs, ner_model=ner_model,
+            )
+        if self.setting.model_type == 'ReSetPre4DEE':
+            self.model = ReSetPre4DEEModel(
+                self.setting, self.event_type_fields_pairs, ner_model=ner_model,
+            )
         # else:
         #     raise Exception('Unsupported model type {}'.format(self.setting.model_type))
 
