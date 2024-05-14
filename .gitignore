@@ -7,3 +7,4 @@ Exps/
 *.log
 
 # 忽略特定文件
+DEE/bert-bash-chinese/
